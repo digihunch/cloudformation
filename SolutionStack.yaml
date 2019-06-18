@@ -1,0 +1,401 @@
+### Prerequisite
+# line 366 and line 368 should point to correct destination
+
+# This is just a prototype. lots of improvement needed
+# Todo: add parameter group nicely
+# Move database and search engine subnet to private subnet (private routing table)
+# add nat instance serving as jumpbox to instances in private subnet 
+# figure out how to config ssh access from jumpbox to instanes in private subnet
+# think about multi-DC deployment
+
+#Metadata:
+#  AWS::CloudFormation::Interface:
+#    ParameterGroups:
+
+Parameters:
+  EnvironmentSize:
+    Type: String
+    Default: SMALL
+    AllowedValues:
+      - SMALL
+      - MEDIUM
+      - LARGE
+    Description: Environment Size (SMALL=1,1,1 MEDIUM=3,3,3 LARGE=5,5,5)
+  ApplicationInstanceType:
+    Type: String
+    Default: t2.micro
+  DatabaseInstanceType:
+    Type: String
+    Default: t2.micro
+  SearchEngineInstanceType:
+    Type: String
+    Default: t2.micro
+  DatabaseInstaller:
+    Type: String
+    Default: rialto-database-7.4.0.3b1964.zip
+  ApplicationInstaller:
+    Type: String
+    Default: rialto-all-7.4.0.3b1964.zip
+#Conditions:
+#  isLarge:
+#    !Equals [!Ref EnvironmentSize, "LARGE"]
+#  isntLarge:
+#    !Not [!Equals [!Ref EnvironmentSize, "LARGE"]]
+Mappings:
+  RegionMap:
+    us-east-1:
+      AMALINUX: ami-0080e4c5bc078760e
+    us-east-2:
+      AMALINUX: ami-0cd3dfa4e37921605
+    us-west-1:
+      AMALINUX: ami-0ec6517f6edbf8044
+    us-west-2:
+      AMALINUX: ami-01e24be29428c15b2
+    sa-east-1:
+      AMALINUX: ami-05145e0b28ad8e0b2
+    ca-central-1:
+      AMALINUX: ami-07423fb63ea0a0930
+    eu-west-1:
+      AMALINUX: ami-08935252a36e25f85
+    eu-west-2:
+      AMALINUX: ami-01419b804382064e4
+    eu-west-3:
+      AMALINUX: ami-0dd7e7ed60da8fb83
+    eu-central-1:
+      AMALINUX: ami-0cfbf4f6db41068ac
+    ap-southeast-1:
+      AMALINUX: ami-05b3bcf7f311194b3
+    ap-southeast-2:
+      AMALINUX: ami-02fd0b06f06d93dfc
+    ap-northeast-1:
+      AMALINUX: ami-00a5245b4816c38e6
+    ap-northeast-2:
+      AMALINUX: ami-00dc207f8ba6dc919
+    ap-south-1:
+      AMALINUX: ami-0ad42f4f66f6c1cc9
+    cn-north-1:
+      AMALINUX: ami-8e6aa0e3
+
+  InstanceCount:
+    SMALL:
+      "InstCnt" : 1
+    MEDIUM:
+      "InstCnt" : 3
+    LARGE:
+      "InstCnt" : 5
+Resources:
+  InstIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "InstallerIAMRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AutoScalingReadOnlyAccess
+  EC2InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      InstanceProfileName: "InstallerIAMRole"
+      Path: "/"
+      Roles:
+        - Ref: InstIAMRole
+  SolutionStackVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+       CidrBlock: 10.0.0.0/26
+       EnableDnsSupport: 'true'
+       EnableDnsHostnames: 'true'
+       Tags:
+        - Key: Name
+          Value: Solution Stack VPC
+  SolutionStackIGW:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: SolutionStackVPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref SolutionStackVPC
+      InternetGatewayId: !Ref SolutionStackIGW
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SolutionStackVPC
+  PublicRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref SolutionStackIGW
+  CommonSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: 
+        Ref: SolutionStackVPC
+      GroupDescription: Common Security Group for Solution servers at all layers
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: -1
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        ToPort: 22
+        FromPort: 22
+        IpProtocol: tcp
+      - CidrIp: 10.0.0.0/26
+        ToPort: 9200
+        FromPort: 9200
+        IpProtocol: tcp
+      Tags:
+        - Key: Name
+          Value: Common Security Group for all layers 
+  ApplicationSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: SolutionStackVPC
+      CidrBlock: 10.0.0.0/28
+      MapPublicIpOnLaunch: 'true'
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: ''
+      Tags:
+        - Key: Name
+          Value: Application Subnet
+  DatabaseSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: SolutionStackVPC
+      CidrBlock: 10.0.0.16/28
+      MapPublicIpOnLaunch: 'true'
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: ''
+      Tags:
+        - Key: Name
+          Value: Database Subnet
+  SearchEngineSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: SolutionStackVPC
+      CidrBlock: 10.0.0.32/28
+      MapPublicIpOnLaunch: 'true'
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: ''
+      Tags:
+        - Key: Name
+          Value: Search Engine Subnet
+
+  ApplicationSubnetAssociationWithRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref ApplicationSubnet
+
+  DatabaseSubnetAssociationWithRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref DatabaseSubnet
+
+  SearchEngineSubnetAssociationWithRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref SearchEngineSubnet
+
+  ApplicationLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties: 
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
+      InstanceType: !Ref ApplicationInstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: yi_cs
+      SecurityGroups:
+        - Ref: "CommonSecurityGroup"
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash
+            yum update -y aws-cfn-bootstrap 
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource ApplicationServerGroup --configsets solution_cs --region ${AWS::Region}
+            yum -y update
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ApplicationServerGroup --region ${AWS::Region}
+            aws configure set region ${AWS::Region}
+            runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
+  DatabaseLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties: 
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
+      InstanceType: !Ref DatabaseInstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: yi_cs
+      SecurityGroups:
+        - Ref: "CommonSecurityGroup"
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash
+            yum update -y aws-cfn-bootstrap
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource DatabaseServerGroup --configsets solution_cs --region ${AWS::Region}
+            yum -y update
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource DatabaseServerGroup --region ${AWS::Region}
+            aws configure set region ${AWS::Region}
+            runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
+  SearchEngineLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties: 
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
+      InstanceType: !Ref SearchEngineInstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: yi_cs
+      SecurityGroups:
+        - Ref: "CommonSecurityGroup"
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash
+            yum update -y aws-cfn-bootstrap
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource SearchEngineServerGroup --configsets solution_cs --region ${AWS::Region}
+            yum -y update
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource SearchEngineServerGroup --region ${AWS::Region}
+            aws configure set region ${AWS::Region}
+            runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
+  ApplicationServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Ref: ApplicationSubnet
+      LaunchConfigurationName:
+        Ref: ApplicationLaunchConfig
+      MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+      MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+    CreationPolicy:
+      ResourceSignal:
+        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+        Timeout: PT15M
+    DeletionPolicy: Delete
+  DatabaseServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Ref: DatabaseSubnet
+      LaunchConfigurationName:
+        Ref: DatabaseLaunchConfig
+      MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+      MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+    CreationPolicy:
+      ResourceSignal:
+        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+        Timeout: PT15M
+    DeletionPolicy: Delete
+  SearchEngineServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Ref: SearchEngineSubnet
+      LaunchConfigurationName:
+        Ref: SearchEngineLaunchConfig
+      MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+      MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+    CreationPolicy:
+      ResourceSignal:
+        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+        Timeout: PT15M
+    DeletionPolicy: Delete
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          solution_cs:
+            - "configure_cfn"
+            - "pull_application_installer"
+#            - "install_application"
+        configure_cfn:
+          files:
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.EC2.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource SearchEngineServerGroup --configsets solution_cs --region ${AWS::Region}
+              mode: "000400"
+              owner: root
+              group: root
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                verbose=true
+                interval=5
+              mode: "000400"
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - "/etc/cfn/cfn-hup.conf"
+                  - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+        pull_application_installer:
+          files:
+            /home/ec2-user/get-asg-nodes.sh:
+              content: |
+                #!/bin/bash
+                for i in `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-name $1 | grep -i instanceid  | awk '{ print $2}' | cut -d',' -f1| sed -e 's/"//g'`
+                do
+                aws ec2 describe-instances --instance-ids $i | grep -i PrivateIpAddress | awk '{ print $2 }' | head -1 | cut -d"," -f1
+                done
+              mode: "000755"
+              owner: ec2-user
+              group: ec2-user
+          sources:
+            /tmp: "https://vc-install.s3.amazonaws.com/rialto-all-7.4.0.3b1964.zip"
+          sources:
+            /tmp: "https://vc-install.s3.amazonaws.com/rialto-database-7.4.0.3b1964.zip"
+          services:
+            sysvinit:
+              iptables:
+                enabled: "true"
+                ensureRunning: "true"
+#          install_application:
+#            commands:
+#              01_print_application_nodes:
+#                cwd: "/home/ec2-user"
+#                command: !Sub |
+#                  get-asg-nodes.sh '${ApplicationServerGroup.AutoScalingGroupName}' > application_nodes.txt
+#              02_print_database_nodes:
+#                cwd: "/home/ec2-user"
+#                command: !Sub |
+#                  get-asg-nodes.sh ${DatabaseServerGroup.AutoScalingGroupName} > database_nodes.txt
+#              03_print_searchengine_nodes:
+#                cwd: "/home/ec2-user"
+#                command: !Sub |
+#                  get-asg-nodes.sh ${SearchEngineServerGroup.AutoScalingGroupName} > searchengine_nodes.txt
+  # S3:
+  #   Type: "AWS::S3::Bucket"
+  #   DeletionPolicy: Retain
+#Outputs:
+#  wproot:
+#    Description: Access URL for Application
+#    Value: !Join ["", ["https://", !GetAtt EC2.PublicIp, ":2525"]]
+#  wpadmin:
+#    Description: Admin Login URL - if restoring from snap, always go to this URL first
+#    Value: !Join ["", ["http://", !GetAtt EC2.PublicIp, "/wordpress/wp-login.php"]]
