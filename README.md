@@ -4,7 +4,9 @@
 * [Setup](#setup)
 
 ## General info
-This is cloudformation template
+This is cloudformation template. The purpose of this template is to automate general deployment for all three-tier, two-DC deployments. NAT instance sits in public subnet and serves as jumpbox. All other nodes sits in private subnet.
+
+Application load balancer will be configured if I have the time.
 	
 ## Useful Commands
 Cloudformation template
