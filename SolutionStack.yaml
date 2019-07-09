@@ -137,27 +137,31 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref SolutionStackIGW
-  CommonSecurityGroup:
+  AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       VpcId: 
         Ref: SolutionStackVPC
-      GroupDescription: Common Security Group for Solution servers at all layers
+      GroupDescription: App Security Group for Solution servers at app layer
       SecurityGroupEgress:
       - CidrIp: 0.0.0.0/0
         IpProtocol: -1
       SecurityGroupIngress:
-      - CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        CidrIp: 0.0.0.0/0
         ToPort: 22
         FromPort: 22
-        IpProtocol: tcp
-      - CidrIp: 10.0.0.0/26
-        ToPort: 9200
-        FromPort: 9200
-        IpProtocol: tcp
+      - IpProtocol: tcp
+        CidrIp: 10.0.0.0/26
+        ToPort: 8080
+        FromPort: 8080
+      - IpProtocol: icmp
+        FromPort: 8
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: Common Security Group for all layers 
+          Value: App Security Group for app layers 
   ApplicationSubnet:
     Type: AWS::EC2::Subnet
     Properties:
@@ -207,18 +211,6 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
       SubnetId: !Ref ApplicationSubnet
 
-  DatabaseSubnetAssociationWithRouteTable:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref DatabaseSubnet
-
-  SearchEngineSubnetAssociationWithRouteTable:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref SearchEngineSubnet
-
   ApplicationLaunchConfig:
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties: 
@@ -227,7 +219,7 @@ Resources:
       IamInstanceProfile: !Ref EC2InstanceProfile
       KeyName: yi_cs
       SecurityGroups:
-        - Ref: "CommonSecurityGroup"
+        - Ref: "AppSecurityGroup"
       UserData:
         "Fn::Base64":
           !Sub |
@@ -238,15 +230,97 @@ Resources:
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ApplicationServerGroup --region ${AWS::Region}
             aws configure set region ${AWS::Region}
             runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
+
+  NATInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
+      InstanceType: !Ref ApplicationInstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: yi_cs
+      SubnetId:  !Ref ApplicationSubnet 
+      SecurityGroupIds:  
+        - !Ref AppSecurityGroup
+#     Cannot specify both security group and Subnet for an Instance.
+      SourceDestCheck: false
+      Tags:
+        - Key: Name
+          Value: NAT Instance
+  ApplicationServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Ref: ApplicationSubnet
+      LaunchConfigurationName:
+        Ref: ApplicationLaunchConfig
+      MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+      MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+    CreationPolicy:
+      ResourceSignal:
+        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+        Timeout: PT15M
+    DeletionPolicy: Delete
+  
+  # Private Security Group
+  PrivateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: 
+        Ref: SolutionStackVPC
+      GroupDescription: Private Security Group for Solution servers at db or se layer
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: -1
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        CidrIp: 0.0.0.0/0
+        ToPort: 22
+        FromPort: 22
+      - IpProtocol: tcp
+        CidrIp: 10.0.0.0/26
+        ToPort: 8080
+        FromPort: 8080
+      - IpProtocol: icmp
+        FromPort: 8
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Private Security Group for db or se layers 
+
+  
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SolutionStackVPC
+  # Add Private Route once NAT instance is created in public subnet
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      InstanceId: !Ref NATInstance
+  DatabaseSubnetAssociationWithRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref DatabaseSubnet
+  SearchEngineSubnetAssociationWithRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref SearchEngineSubnet
   DatabaseLaunchConfig:
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties: 
       ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
       InstanceType: !Ref DatabaseInstanceType
       IamInstanceProfile: !Ref EC2InstanceProfile
+      AssociatePublicIpAddress: false
       KeyName: yi_cs
       SecurityGroups:
-        - Ref: "CommonSecurityGroup"
+        - Ref: "PrivateSecurityGroup"
       UserData:
         "Fn::Base64":
           !Sub |
@@ -263,9 +337,10 @@ Resources:
       ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
       InstanceType: !Ref SearchEngineInstanceType
       IamInstanceProfile: !Ref EC2InstanceProfile
+      AssociatePublicIpAddress: false
       KeyName: yi_cs
       SecurityGroups:
-        - Ref: "CommonSecurityGroup"
+        - Ref: "PrivateSecurityGroup"
       UserData:
         "Fn::Base64":
           !Sub |
@@ -276,20 +351,6 @@ Resources:
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource SearchEngineServerGroup --region ${AWS::Region}
             aws configure set region ${AWS::Region}
             runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
-  ApplicationServerGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties:
-      VPCZoneIdentifier:
-        - Ref: ApplicationSubnet
-      LaunchConfigurationName:
-        Ref: ApplicationLaunchConfig
-      MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-      MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-    CreationPolicy:
-      ResourceSignal:
-        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-        Timeout: PT15M
-    DeletionPolicy: Delete
   DatabaseServerGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -299,10 +360,10 @@ Resources:
         Ref: DatabaseLaunchConfig
       MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
       MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-    CreationPolicy:
-      ResourceSignal:
-        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-        Timeout: PT15M
+#    CreationPolicy:
+#      ResourceSignal:
+#        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+#        Timeout: PT15M
     DeletionPolicy: Delete
   SearchEngineServerGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -313,10 +374,10 @@ Resources:
         Ref: SearchEngineLaunchConfig
       MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
       MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-    CreationPolicy:
-      ResourceSignal:
-        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-        Timeout: PT15M
+#    CreationPolicy:
+#      ResourceSignal:
+#        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+#        Timeout: PT15M
     DeletionPolicy: Delete
     Metadata:
       AWS::CloudFormation::Init:

@@ -11,7 +11,8 @@ Application load balancer will be configured if I have the time.
 ## Useful Commands
 Cloudformation template
 
-aws cloudformation validate-template --template-body file://SolutionStack.yml
+<!--- aws cloudformation validate-template template-body file://SolutionStack.yml -->
+aws cloudformation validate-template --template-body file:///home/yi/CloudFormation/SolutionStack.yaml
 
 aws cloudformation create-stack --stack-name mytest --template-body file://SolutionStack.yaml --capabilities CAPABILITY_NAMED_IAM
 
