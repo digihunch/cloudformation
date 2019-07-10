@@ -3,11 +3,10 @@
 
 # This is just a prototype. lots of improvement needed
 # Todo: add parameter group nicely
-# Move database and search engine subnet to private subnet (private routing table)
-# add nat instance serving as jumpbox to instances in private subnet 
 # figure out how to config ssh access from jumpbox to instanes in private subnet
-# think about multi-DC deployment
-
+# For multi-DC deployment - run the cf code multiple times
+# send success signal from private instance: 
+# https://aws.amazon.com/blogs/mt/signaling-aws-cloudformation-waitconditions-using-aws-privatelink/
 #Metadata:
 #  AWS::CloudFormation::Interface:
 #    ParameterGroups:
@@ -45,36 +44,49 @@ Mappings:
   RegionMap:
     us-east-1:
       AMALINUX: ami-0080e4c5bc078760e
+      NATAMI: ami-00a9d4a05375b2763
     us-east-2:
       AMALINUX: ami-0cd3dfa4e37921605
+      NATAMI: ami-00d1f8201864cc10c
     us-west-1:
       AMALINUX: ami-0ec6517f6edbf8044
+      NATAMI: ami-097ad469381034fa2
     us-west-2:
       AMALINUX: ami-01e24be29428c15b2
+      NATAMI: ami-0b840e8a1ce4cdf15
     sa-east-1:
       AMALINUX: ami-05145e0b28ad8e0b2
+      NATAMI: ami-057f5d52ff7ae75ae
     ca-central-1:
       AMALINUX: ami-07423fb63ea0a0930
+      NATAMI: ami-0b32354309da5bba5
     eu-west-1:
       AMALINUX: ami-08935252a36e25f85
+      NATAMI: ami-024107e3e3217a248
     eu-west-2:
       AMALINUX: ami-01419b804382064e4
+      NATAMI: ami-0ca65a55561666293
     eu-west-3:
       AMALINUX: ami-0dd7e7ed60da8fb83
+      NATAMI: ami-0641e4dfc1427f114
     eu-central-1:
       AMALINUX: ami-0cfbf4f6db41068ac
+      NATAMI: ami-06a5303d47fbd8c60
     ap-southeast-1:
       AMALINUX: ami-05b3bcf7f311194b3
+      NATAMI: ami-01514bb1776d5c018
     ap-southeast-2:
       AMALINUX: ami-02fd0b06f06d93dfc
+      NATAMI: ami-062c04ec46aecd204
     ap-northeast-1:
       AMALINUX: ami-00a5245b4816c38e6
+      NATAMI: ami-00d29e4cb217ae06b
     ap-northeast-2:
       AMALINUX: ami-00dc207f8ba6dc919
+      NATAMI: ami-0d98591cbf9ef1ffd
     ap-south-1:
       AMALINUX: ami-0ad42f4f66f6c1cc9
-    cn-north-1:
-      AMALINUX: ami-8e6aa0e3
+      NATAMI: ami-00b3aa8a93dd09c13
 
   InstanceCount:
     SMALL:
@@ -234,14 +246,15 @@ Resources:
   NATInstance:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
+      # in order to get NAT instance to work, NAT image should be used instead of regular EC2 image. Security group should allow ICMP as well; SourceDestCheck should turn off
+      # although the instruction mentions the main route table should be the one that points to NAT instance, it seems to be working without that being main route table.
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", NATAMI]
       InstanceType: !Ref ApplicationInstanceType
       IamInstanceProfile: !Ref EC2InstanceProfile
       KeyName: yi_cs
       SubnetId:  !Ref ApplicationSubnet 
       SecurityGroupIds:  
         - !Ref AppSecurityGroup
-#     Cannot specify both security group and Subnet for an Instance.
       SourceDestCheck: false
       Tags:
         - Key: Name
@@ -287,8 +300,6 @@ Resources:
       Tags:
         - Key: Name
           Value: Private Security Group for db or se layers 
-
-  
 
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
@@ -360,10 +371,10 @@ Resources:
         Ref: DatabaseLaunchConfig
       MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
       MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-#    CreationPolicy:
-#      ResourceSignal:
-#        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-#        Timeout: PT15M
+    CreationPolicy:
+      ResourceSignal:
+        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+        Timeout: PT15M
     DeletionPolicy: Delete
   SearchEngineServerGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -374,10 +385,10 @@ Resources:
         Ref: SearchEngineLaunchConfig
       MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
       MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-#    CreationPolicy:
-#      ResourceSignal:
-#        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-#        Timeout: PT15M
+    CreationPolicy:
+      ResourceSignal:
+        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
+        Timeout: PT15M
     DeletionPolicy: Delete
     Metadata:
       AWS::CloudFormation::Init:
