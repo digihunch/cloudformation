@@ -14,13 +14,17 @@ Cloudformation template
 <!--- aws cloudformation validate-template template-body file://SolutionStack.yml -->
 aws cloudformation validate-template --template-body file:///home/user/CloudFormation/SolutionStack.yaml
 
-aws cloudformation create-stack --stack-name mytest --template-body file:///home/user/CloudFormation/SolutionStack.yaml --capabilities CAPABILITY_NAMED_IAM
+aws cloudformation create-stack --stack-name solstack --template-body file:///home/user/CloudFormation/SolutionStack.yaml --capabilities CAPABILITY_NAMED_IAM
 
-aws cloudformation delete-stack --stack-name mytest
+--disable-rollback option to disable rollback on failure
 
-aws cloudformation describe-stack-events --stack-name mytest
+aws cloudformation delete-stack --stack-name solstack
+
+aws cloudformation describe-stack-events --stack-name solstack
 
 aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE
+
+aws s3 cp large_file.zip s3://ylu-deep-archive/large_file.zip --storage-class DEEP_ARCHIVE
 
 ## Setup
 Run AWS cli command

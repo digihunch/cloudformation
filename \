@@ -3,6 +3,11 @@
 
 # This is just a prototype. lots of improvement needed
 # Todo: add parameter group nicely
+# figure out how to config ssh access from jumpbox to instanes in private subnet
+# For multi-DC deployment - run the cf code multiple times
+# send success signal from private instance:
+# https://aws.amazon.com/blogs/mt/signaling-aws-cloudformation-waitconditions-using-aws-privatelink/
+# smart subnetting
 
 #Metadata:
 #  AWS::CloudFormation::Interface:
@@ -122,8 +127,8 @@ Resources:
     Type: AWS::EC2::VPC
     Properties:
        CidrBlock: 10.0.0.0/26
-       EnableDnsSupport: true
-       EnableDnsHostnames: true
+       EnableDnsSupport: 'true'
+       EnableDnsHostnames: 'true'
        Tags:
         - Key: Name
           Value: Solution Stack VPC
@@ -152,7 +157,8 @@ Resources:
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Ref SolutionStackVPC
+      VpcId: 
+        Ref: SolutionStackVPC
       GroupDescription: App Security Group for Solution servers at app layer
       SecurityGroupEgress:
       - CidrIp: 0.0.0.0/0
@@ -164,12 +170,8 @@ Resources:
         FromPort: 22
       - IpProtocol: tcp
         CidrIp: 10.0.0.0/26
-        ToPort: 80
-        FromPort: 80
-      - IpProtocol: tcp
-        CidrIp: 0.0.0.0/0
-        ToPort: 443
-        FromPort: 443
+        ToPort: 8080
+        FromPort: 8080
       - IpProtocol: icmp
         FromPort: 8
         ToPort: -1
@@ -180,9 +182,10 @@ Resources:
   ApplicationSubnet:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref SolutionStackVPC
+      VpcId:
+        Ref: SolutionStackVPC
       CidrBlock: 10.0.0.0/28
-      MapPublicIpOnLaunch: true
+      MapPublicIpOnLaunch: 'true'
       AvailabilityZone:
         Fn::Select:
           - 1
@@ -193,9 +196,10 @@ Resources:
   DatabaseSubnet:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref SolutionStackVPC
+      VpcId:
+        Ref: SolutionStackVPC
       CidrBlock: 10.0.0.16/28
-      MapPublicIpOnLaunch: false
+      MapPublicIpOnLaunch: 'true'
       AvailabilityZone:
         Fn::Select:
           - 1
@@ -206,9 +210,10 @@ Resources:
   SearchEngineSubnet:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref SolutionStackVPC
+      VpcId:
+        Ref: SolutionStackVPC
       CidrBlock: 10.0.0.32/28
-      MapPublicIpOnLaunch: false
+      MapPublicIpOnLaunch: 'true'
       AvailabilityZone:
         Fn::Select:
           - 1
@@ -231,7 +236,7 @@ Resources:
       IamInstanceProfile: !Ref EC2InstanceProfile
       KeyName: yi_cs
       SecurityGroups:
-        - !Ref AppSecurityGroup
+        - Ref: "AppSecurityGroup"
 #      Tags:
 #        -
 #          Key: Name
@@ -266,7 +271,7 @@ Resources:
   ApplicationServerGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      VPCZoneIdentifier: 
+      VPCZoneIdentifier:
         - Ref: ApplicationSubnet
       LaunchConfigurationName:
         Ref: ApplicationLaunchConfig
@@ -279,14 +284,15 @@ Resources:
     CreationPolicy:
       ResourceSignal:
         Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-        Timeout: PT5M
+        Timeout: PT15M
     DeletionPolicy: Delete
   
   # Private Security Group
   PrivateSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Ref SolutionStackVPC
+      VpcId: 
+        Ref: SolutionStackVPC
       GroupDescription: Private Security Group for Solution servers at db or se layer
       SecurityGroupEgress:
       - CidrIp: 0.0.0.0/0
@@ -298,8 +304,8 @@ Resources:
         FromPort: 22
       - IpProtocol: tcp
         CidrIp: 10.0.0.0/26
-        ToPort: 80
-        FromPort: 80
+        ToPort: 8080
+        FromPort: 8080
       - IpProtocol: icmp
         FromPort: 8
         ToPort: -1
@@ -308,23 +314,7 @@ Resources:
         - Key: Name
           Value: Private Security Group for db or se layers 
 
-
-  EndPointSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId: !Ref SolutionStackVPC
-      GroupDescription: Traffic into VPC Endpoint
-      SecurityGroupIngress:
-      - IpProtocol: tcp
-        CidrIp: 0.0.0.0/0
-        ToPort: 443
-        FromPort: 443
-      Tags:
-        - Key: Name
-          Value: Endpoint Security Group
-
   # Create an AWS Private Link to allow private instances to signal AWS CloudFormation WaitConditions
-  # https://aws.amazon.com/blogs/mt/signaling-aws-cloudformation-waitconditions-using-aws-privatelink/
   CfnEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -332,12 +322,12 @@ Resources:
       ServiceName: !Sub "com.amazonaws.${AWS::Region}.cloudformation"
       VpcEndpointType: "Interface"
       PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref DatabaseSubnet
+#      SubnetIds:
+#        - !Ref DatabaseSubnet
 #        - !Ref SearchEngineSubnet
-#   if two subnets sit on the same AZ, then only one subnet Id can be specified here. 2019.07.10
-      SecurityGroupIds:
-        - !Ref EndPointSecurityGroup
+#      SecurityGroupIds:
+#        - !Ref PrivateSecurityGroup
+
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -360,7 +350,6 @@ Resources:
       RouteTableId: !Ref PrivateRouteTable
       SubnetId: !Ref SearchEngineSubnet
   DatabaseLaunchConfig:
-    DependsOn: DatabaseSubnetAssociationWithRouteTable
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties: 
       ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
@@ -369,7 +358,11 @@ Resources:
       AssociatePublicIpAddress: false
       KeyName: yi_cs
       SecurityGroups:
-        - !Ref PrivateSecurityGroup
+        - Ref: "PrivateSecurityGroup"
+#      Tags:
+#        -
+#          Key: Name
+#          Value: Database Node
       UserData:
         "Fn::Base64":
           !Sub |
@@ -381,7 +374,6 @@ Resources:
             aws configure set region ${AWS::Region}
             runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
   SearchEngineLaunchConfig:
-    DependsOn: SearchEngineSubnetAssociationWithRouteTable
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties: 
       ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
@@ -390,7 +382,7 @@ Resources:
       AssociatePublicIpAddress: false
       KeyName: yi_cs
       SecurityGroups:
-        - !Ref PrivateSecurityGroup
+        - Ref: "PrivateSecurityGroup"
 #      Tags:
 #        -
 #          Key: Name
@@ -406,14 +398,13 @@ Resources:
             aws configure set region ${AWS::Region}
             runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
   DatabaseServerGroup:
-    DependsOn: 
-      - CfnEndpoint
-      - NATInstance
+    DependsOn: CfnEndpoint
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      VPCZoneIdentifier: 
+      VPCZoneIdentifier:
         - Ref: DatabaseSubnet
-      LaunchConfigurationName: !Ref DatabaseLaunchConfig
+      LaunchConfigurationName:
+        Ref: DatabaseLaunchConfig
       MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
       MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
       Tags:
@@ -423,17 +414,16 @@ Resources:
     CreationPolicy:
       ResourceSignal:
         Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-        Timeout: PT5M
+        Timeout: PT15M
     DeletionPolicy: Delete
   SearchEngineServerGroup:
-    DependsOn: 
-      - CfnEndpoint
-      - NATInstance
+    DependsOn: CfnEndpoint
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      VPCZoneIdentifier: 
+      VPCZoneIdentifier:
         - Ref: SearchEngineSubnet
-      LaunchConfigurationName: !Ref SearchEngineLaunchConfig
+      LaunchConfigurationName:
+        Ref: SearchEngineLaunchConfig
       MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
       MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
       Tags:
@@ -443,7 +433,7 @@ Resources:
     CreationPolicy:
       ResourceSignal:
         Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-        Timeout: PT5M
+        Timeout: PT15M
     DeletionPolicy: Delete
     Metadata:
       AWS::CloudFormation::Init:
