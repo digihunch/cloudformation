@@ -1,20 +1,31 @@
-### Prerequisite
-# line 366 and line 368 should point to correct destination
-
-# This is just a prototype. lots of improvement needed
-# Todo: 
-#   1. download installer into /tmp
-#   2. make get-asg-nodes.sh to work
-#   3. change SIGNAL to issue after installation
-#   4. double AZ deployment
-#   5. parameter group in script
-#   6. Output in script
-#   7. clarify the cfn cloud log and process and cfn metadata, condition
-#   8. write summary in glowing hunch
-
-#Metadata:
-#  AWS::CloudFormation::Interface:
-#    ParameterGroups:
+### Check README.md for details
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Instance Size Configuration"
+        Parameters:
+          - ApplicationInstanceType
+          - DatabaseInstanceType
+          - SearchEngineInstanceType
+      - 
+        Label:
+          default: "Install Source Configuration"
+        Parameters:
+          - InstallerCoordinator
+          - InstallerBucketName
+      -
+        Label:
+          default: "Environment Configuration"
+        Parameters:
+          - EnvironmentSize
+          - PubKeyName
+    ParameterLabels:
+      InstallerCoordinator:
+        default: "Zip file for Installer Coordinator"
+      EnvironmentSize:
+        default: "Stack Size"
 
 Parameters:
   EnvironmentSize:
@@ -24,7 +35,7 @@ Parameters:
       - SMALL
       - MEDIUM
       - LARGE
-    Description: Environment Size (SMALL=1,1,1 MEDIUM=3,3,3 LARGE=5,5,5)
+    Description: Number of nodes per layer. SMALL=1, MEDIUM=3, LARGE=5
   ApplicationInstanceType:
     Type: String
     Default: t2.micro
@@ -34,23 +45,22 @@ Parameters:
   SearchEngineInstanceType:
     Type: String
     Default: t2.micro
-  DatabaseInstaller:
+  InstallerCoordinator:
     Type: String
-    Default: Database-Installer.sh
-  ApplicationInstaller:
+    Default: cli_inst_coord_script.zip
+  InstallerBucketName:
     Type: String
-    Default: Application-Installer.sh
-  SearchEngineInstaller:
+    Default: aws-cf-files
+  PubKeyName:
     Type: String
-    Default: SearchEngine-Installer.sh
-  InstallerPath:
-    Type: String
-    Default: https://vc-install.s3.amazonaws.com/
-#Conditions:
-#  isLarge:
-#    !Equals [!Ref EnvironmentSize, "LARGE"]
-#  isntLarge:
-#    !Not [!Equals [!Ref EnvironmentSize, "LARGE"]]
+    Default: SolutionFormationPublicKey
+
+# Note: this condition is not used at this stage.
+Conditions:
+  doCreateLoadBalancer: !Or
+    - !Equals [!Ref EnvironmentSize, "MEDIUM"]
+    - !Equals [!Ref EnvironmentSize, "LARGE"]
+
 Mappings:
   RegionMap:
     us-east-1:
@@ -99,16 +109,20 @@ Mappings:
       AMALINUX: ami-0ad42f4f66f6c1cc9
       NATAMI: ami-00b3aa8a93dd09c13
 
-  InstanceCount:
+  InstanceSpec:
     SMALL:
-      "InstCnt" : 1
+      InstCnt : 1
+      CreationTimeOut: PT5M
     MEDIUM:
-      "InstCnt" : 3
+      InstCnt : 3
+      CreationTimeOut: PT10M
     LARGE:
-      "InstCnt" : 5
+      InstCnt : 5
+      CreationTimeOut: PT20M
+  # CreationTimeOut describes how long stack should wait for success signal before considering failure.
 Resources:
-  InstIAMRole:
-    Type: "AWS::IAM::Role"
+  EC2InstanceIAMRole:
+    Type: AWS::IAM::Role
     Properties:
       RoleName: "InstallerIAMRole"
       AssumeRolePolicyDocument:
@@ -122,16 +136,58 @@ Resources:
                 - "ec2.amazonaws.com"
       Path: "/"
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
-        - arn:aws:iam::aws:policy/AutoScalingReadOnlyAccess
+        # - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess      # Access to S3 bucket is granted through CloudFormation::Authentication
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess       # This allows EC2 instances to fetch ip address of other EC2 instance through aws cli
+        - arn:aws:iam::aws:policy/AutoScalingReadOnlyAccess     # This allows EC2 instances to read auto scaling group information through aws cli
+
+  InstallerAccessUser:
+    Type: AWS::IAM::User
+    Properties:
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                  - s3:GetObject
+                Resource: '*'
+
+  InstallerAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref InstallerAccessUser
+
+  InstallerBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2008-10-17'
+        Id: InstallerBucketPolicy
+        Statement:
+          - Sid: ReadAccess
+            Action:
+              - s3:GetObject
+            Effect: Allow
+            Resource: !Join
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref InstallerBucketName
+                - /*
+            Principal:
+              AWS: !GetAtt 'InstallerAccessUser.Arn'
+      Bucket: !Ref InstallerBucketName 
+
+
+# Instance Profile to assign to all EC2 instance created in this solution to avoid permission issues.
   EC2InstanceProfile:
-    Type: "AWS::IAM::InstanceProfile"
+    Type: AWS::IAM::InstanceProfile
     Properties:
       InstanceProfileName: "InstallerIAMRole"
       Path: "/"
       Roles:
-        - Ref: InstIAMRole
+        - Ref: EC2InstanceIAMRole
   SolutionStackVPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -156,6 +212,7 @@ Resources:
       Tags:
        - Key: Name
          Value: Public Route Table
+# Public Route directs outgoing traffic to Internet Gateway
   PublicRoute1:
     Type: AWS::EC2::Route
     DependsOn: AttachGateway
@@ -190,7 +247,9 @@ Resources:
         CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: App Security Group for app layer 
+          Value: App Security Group for app layer
+
+# Application Subnet is public, Database and SearchEngine subnets are private
   ApplicationSubnet:
     Type: AWS::EC2::Subnet
     Properties:
@@ -237,39 +296,15 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
       SubnetId: !Ref ApplicationSubnet
 
-  ApplicationLaunchConfig:
-    Type: AWS::AutoScaling::LaunchConfiguration
-    Properties: 
-      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
-      InstanceType: !Ref ApplicationInstanceType
-      IamInstanceProfile: !Ref EC2InstanceProfile
-      KeyName: yi_cs
-      SecurityGroups:
-        - !Ref AppSecurityGroup
-#      Tags:
-#        -
-#          Key: Name
-#          Value: Application Node
-      UserData:
-        "Fn::Base64":
-          !Sub |
-            #!/bin/bash
-            yum update -y aws-cfn-bootstrap 
-            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource ApplicationServerGroup --configsets solution_cs --region ${AWS::Region}
-            yum -y update
-            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ApplicationServerGroup --region ${AWS::Region}
-            aws configure set region ${AWS::Region}
-            runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
-
+# NAT instance is placed in public subnet and must be based off a NAT image (not a regular Amazon Linux Image!). Security group should allow ICPM and SourceDestCheck must be turned off.
+# The instruction also mentions that the route table pointing to NAT instance should be the main route table of VPC, it does not seem to matter though.
   NATInstance:
     Type: AWS::EC2::Instance
     Properties:
-      # in order to get NAT instance to work, NAT image should be used instead of regular EC2 image. Security group should allow ICMP as well; SourceDestCheck should turn off
-      # although the instruction mentions the main route table should be the one that points to NAT instance, it seems to be working without that being main route table.
       ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", NATAMI]
       InstanceType: !Ref ApplicationInstanceType
       IamInstanceProfile: !Ref EC2InstanceProfile
-      KeyName: yi_cs
+      KeyName: !Ref PubKeyName
       SubnetId:  !Ref ApplicationSubnet 
       SecurityGroupIds:  
         - !Ref AppSecurityGroup
@@ -277,149 +312,18 @@ Resources:
       Tags:
         - Key: Name
           Value: NAT Instance
-  ApplicationServerGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties:
-      VPCZoneIdentifier: 
-        - Ref: ApplicationSubnet
-      LaunchConfigurationName:
-        Ref: ApplicationLaunchConfig
-      MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-      MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-      Tags:
-        - Key: Name
-          Value: Application Node
-          PropagateAtLaunch: true
-    CreationPolicy:
-      ResourceSignal:
-        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-        Timeout: PT5M
-    DeletionPolicy: Delete
-    Metadata:
-      AWS::CloudFormation::Init:
-        configSets:
-          solution_cs:
-            - "configure_cfn"
-            - "pull_node_installer"
-            - "install_node"
-        configure_cfn:
-          files:
-            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
-              content: !Sub |
-                [cfn-auto-reloader-hook]
-                triggers=post.update
-                path=Resources.EC2.Metadata.AWS::CloudFormation::Init
-                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource SearchEngineServerGroup --configsets solution_cs --region ${AWS::Region}
-              mode: "000400"
-              owner: root
-              group: root
-            /etc/cfn/cfn-hup.conf:
-              content: !Sub |
-                [main]
-                stack=${AWS::StackId}
-                region=${AWS::Region}
-                verbose=true
-                interval=5
-              mode: "000400"
-              owner: root
-              group: root
-          services:
-            sysvinit:
-              cfn-hup:
-                enabled: "true"
-                ensureRunning: "true"
-                files:
-                  - "/etc/cfn/cfn-hup.conf"
-                  - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
-        pull_node_installer:
-          files:
-            /home/ec2-user/get-asg-nodes.sh:
-              content: |
-                #!/bin/bash
-                for i in `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-name $1 | grep -i instanceid  | awk '{ print $2}' | cut -d',' -f1| sed -e 's/"//g'`
-                do
-                aws ec2 describe-instances --instance-ids $i | grep -i PrivateIpAddress | awk '{ print $2 }' | head -1 | cut -d"," -f1
-                done
-              mode: "000755"
-              owner: ec2-user
-              group: ec2-user
-          sources:
-            /tmp: !Join ["", [!Ref InstallerPath, !Ref ApplicationInstaller]]
-#          services:
-#            sysvinit:
-#              iptables:
-#                enabled: "true"
-#                ensureRunning: "true"
-        install_node:
-          commands:
-            01_print_nodes_in_layer:
-              cwd: "/home/ec2-user"
-              command: get-asg-nodes.sh '${ApplicationServerGroup.AutoScalingGroupName}' > application_nodes.txt
-            02_execute_installer:
-              cwd: "/tmp"
-              command: Application-Installer.sh
-#
-  # Private Security Group
-  PrivateSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId: !Ref SolutionStackVPC
-      GroupDescription: Private Security Group for Solution servers at db or se layer
-      SecurityGroupEgress:
-      - CidrIp: 0.0.0.0/0
-        IpProtocol: -1
-      SecurityGroupIngress:
-      - IpProtocol: tcp
-        CidrIp: 0.0.0.0/0
-        ToPort: 22
-        FromPort: 22
-      - IpProtocol: tcp
-        CidrIp: 10.0.0.0/26
-        ToPort: 80
-        FromPort: 80
-      - IpProtocol: icmp
-        FromPort: 8
-        ToPort: -1
-        CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: Private Security Group for db or se layers 
-
-
-  EndPointSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId: !Ref SolutionStackVPC
-      GroupDescription: Traffic into VPC Endpoint
-      SecurityGroupIngress:
-      - IpProtocol: tcp
-        CidrIp: 0.0.0.0/0
-        ToPort: 443
-        FromPort: 443
-      Tags:
-        - Key: Name
-          Value: Endpoint Security Group
-
-  # Create an AWS Private Link to allow private instances to signal AWS CloudFormation WaitConditions
-  # https://aws.amazon.com/blogs/mt/signaling-aws-cloudformation-waitconditions-using-aws-privatelink/
-  CfnEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref SolutionStackVPC
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.cloudformation"
-      VpcEndpointType: "Interface"
-      PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref DatabaseSubnet
-#        - !Ref SearchEngineSubnet
-#   if two subnets sit on the same AZ, then only one subnet Id can be specified here. 2019.07.10
-      SecurityGroupIds:
-        - !Ref EndPointSecurityGroup
+      UserData:             # NAT instance only needs to configure aws cli environment. 
+        "Fn::Base64":       # UserData must be encoded in Base64
+          !Sub |
+            yum -y update
+            aws configure set region ${AWS::Region}
+            runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref SolutionStackVPC
-  # Add Private Route once NAT instance is created in public subnet
+
+# Once NAT Instance has been created, add route for private subnet to connect to outside through NAT instance.
   PrivateRoute1:
     Type: AWS::EC2::Route
     Properties:
@@ -436,98 +340,103 @@ Resources:
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       SubnetId: !Ref SearchEngineSubnet
-  DatabaseLaunchConfig:
-    DependsOn: DatabaseSubnetAssociationWithRouteTable
+
+# Private Security Group. More ports to open here based on database addn/or search engine ports.
+  PrivateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref SolutionStackVPC
+      GroupDescription: Private Security Group for Solution servers at db or se layer
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: -1
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        CidrIp: 0.0.0.0/0
+        ToPort: 22
+        FromPort: 22
+      - IpProtocol: icmp
+        FromPort: 8
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Private Security Group for db or se layers 
+
+# EndPoint Security Group (traffic through private link is encrypted with SSL)
+  EndPointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref SolutionStackVPC
+      GroupDescription: Traffic into VPC Endpoint
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        CidrIp: 0.0.0.0/0
+        ToPort: 443
+        FromPort: 443
+      Tags:
+        - Key: Name
+          Value: Endpoint Security Group
+
+# CfnEndpoint is a means for private instance to signal AWS CloudFormation WaitConditions through AWS private link, without requiring NAT instance.
+# https://aws.amazon.com/blogs/mt/signaling-aws-cloudformation-waitconditions-using-aws-privatelink/
+  CfnEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref SolutionStackVPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.cloudformation"
+      VpcEndpointType: "Interface"
+      PrivateDnsEnabled: true
+      # Note: if two subnets sits in the same AZ, then only one subnet Id can be specified here. 2019.07.10
+      # Specifying a second subnet Id of the same AZ throws error. I think this is bug or at least an ambiguous requirement.
+      SubnetIds:
+        - !Ref DatabaseSubnet
+#        - !Ref SearchEngineSubnet
+      SecurityGroupIds:
+        - !Ref EndPointSecurityGroup
+
+
+# Launch config for all three layers defines the EC2 instance spec, their user data and CloudFormation::Init is placed in metadata of launch config
+# calling cfn-init from user data allows the EC2 instance, upon launching, to execute configsets defined in metadata of the same resource
+# cfn-hup allows CloudFormation::Init to be executed upon stack updates (using triggers=post.update).
+
+# To troubleshoot AWS::CloudFormation::Init, manually run the following on the server with correct stack name
+# sudo /opt/aws/bin/cfn-init --stack mytest --resource ApplicationLaunchConfig --configsets solution_cs --region us-east-1
+# sources config key only supports zip, tar and no other extensions!
+  ApplicationLaunchConfig:
     Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn: InstallerBucketPolicy
     Properties: 
       ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
-      InstanceType: !Ref DatabaseInstanceType
+      InstanceType: !Ref ApplicationInstanceType
       IamInstanceProfile: !Ref EC2InstanceProfile
-      AssociatePublicIpAddress: false
-      KeyName: yi_cs
+      KeyName: !Ref PubKeyName
       SecurityGroups:
-        - !Ref PrivateSecurityGroup
+        - !Ref AppSecurityGroup
       UserData:
         "Fn::Base64":
           !Sub |
             #!/bin/bash
-            yum update -y aws-cfn-bootstrap
-            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource DatabaseServerGroup --configsets solution_cs --region ${AWS::Region}
-            yum -y update
-            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource DatabaseServerGroup --region ${AWS::Region}
             aws configure set region ${AWS::Region}
             runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
-  SearchEngineLaunchConfig:
-    DependsOn: SearchEngineSubnetAssociationWithRouteTable
-    Type: AWS::AutoScaling::LaunchConfiguration
-    Properties: 
-      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
-      InstanceType: !Ref SearchEngineInstanceType
-      IamInstanceProfile: !Ref EC2InstanceProfile
-      AssociatePublicIpAddress: false
-      KeyName: yi_cs
-      SecurityGroups:
-        - !Ref PrivateSecurityGroup
-#      Tags:
-#        -
-#          Key: Name
-#          Value: Search Engine Node
-      UserData:
-        "Fn::Base64":
-          !Sub |
-            #!/bin/bash
+            runuser -l ec2-user -c 'echo ApplicationServerGroup > /home/ec2-user/role.info'
             yum update -y aws-cfn-bootstrap
-            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource SearchEngineServerGroup --configsets solution_cs --region ${AWS::Region}
             yum -y update
-            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource SearchEngineServerGroup --region ${AWS::Region}
-            aws configure set region ${AWS::Region}
-            runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
-  DatabaseServerGroup:
-    DependsOn: 
-      - CfnEndpoint
-      - NATInstance
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties:
-      VPCZoneIdentifier: 
-        - Ref: DatabaseSubnet
-      LaunchConfigurationName: !Ref DatabaseLaunchConfig
-      MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-      MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-      Tags:
-        - Key: Name
-          Value: Database Node
-          PropagateAtLaunch: true
-    CreationPolicy:
-      ResourceSignal:
-        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-        Timeout: PT5M
-    DeletionPolicy: Delete
-  SearchEngineServerGroup:
-    DependsOn: 
-      - CfnEndpoint
-      - NATInstance
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties:
-      VPCZoneIdentifier: 
-        - Ref: SearchEngineSubnet
-      LaunchConfigurationName: !Ref SearchEngineLaunchConfig
-      MinSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-      MaxSize: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-      Tags:
-        - Key: Name
-          Value: Search Engine Node
-          PropagateAtLaunch: true
-    CreationPolicy:
-      ResourceSignal:
-        Count: !FindInMap [InstanceCount, !Ref EnvironmentSize, InstCnt]
-        Timeout: PT5M
-    DeletionPolicy: Delete
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource ApplicationLaunchConfig --configsets solution_cs
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ApplicationServerGroup
     Metadata:
+      AWS::CloudFormation::Authentication:
+        S3AccessCreds:
+          type: S3
+          accessKeyId: !Ref InstallerAccessKey
+          secretKey: !GetAtt InstallerAccessKey.SecretAccessKey
+          buckets:
+            - !Ref InstallerBucketName
       AWS::CloudFormation::Init:
         configSets:
           solution_cs:
             - "configure_cfn"
-            - "pull_node_installer"
+            - "prepare_install"
             - "install_node"
         configure_cfn:
           files:
@@ -535,8 +444,8 @@ Resources:
               content: !Sub |
                 [cfn-auto-reloader-hook]
                 triggers=post.update
-                path=Resources.EC2.Metadata.AWS::CloudFormation::Init
-                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource SearchEngineServerGroup --configsets solution_cs --region ${AWS::Region}
+                path=Resources.ApplicationLaunchConfig.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource ApplicationLaunchConfig --configsets solution_cs
               mode: "000400"
               owner: root
               group: root
@@ -558,48 +467,250 @@ Resources:
                 files:
                   - "/etc/cfn/cfn-hup.conf"
                   - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
-        pull_node_installer:
-          files:
-            /home/ec2-user/get-asg-nodes.sh:
-              content: |
-                #!/bin/bash
-                for i in `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-name $1 | grep -i instanceid  | awk '{ print $2}' | cut -d',' -f1| sed -e 's/"//g'`
-                do
-                aws ec2 describe-instances --instance-ids $i | grep -i PrivateIpAddress | awk '{ print $2 }' | head -1 | cut -d"," -f1
-                done
-              mode: "000755"
-              owner: ec2-user
-              group: ec2-user
+        prepare_install:
+          packages:
+            yum:
+              jq: []
           sources:
-            /tmp: !Join ["", [!Ref InstallerPath, !Ref SearchEngineInstaller]]
-#          services:
-#            sysvinit:
-#              iptables:
-#                enabled: "true"
-#                ensureRunning: "true"
+            # Note: the two sources must be have different destination because YAML does not allow two entries of the same key name.
+            /home/ec2-user: !Join ["", ["https://", !Ref InstallerBucketName, ".s3.amazonaws.com/", !Ref InstallerCoordinator]]
         install_node:
           commands:
-            01_print_nodes_in_layer:
+            01_print_nodes_info:
               cwd: "/home/ec2-user"
-              command: get-asg-nodes.sh '${SearchEngineServerGroup.AutoScalingGroupName}' > searchengine_nodes.txt
-            02_execute_installer:
-              cwd: "/tmp"
-              command: SearchEngine-Installer.sh
-#              02_print_database_nodes:
-#                cwd: "/home/ec2-user"
-#                command: !Sub |
-#                  get-asg-nodes.sh ${DatabaseServerGroup.AutoScalingGroupName} > database_nodes.txt
-#              03_print_searchengine_nodes:
-#                cwd: "/home/ec2-user"
-#                command: !Sub |
-#                  get-asg-nodes.sh ${SearchEngineServerGroup.AutoScalingGroupName} > searchengine_nodes.txt
-  # S3:
-  #   Type: "AWS::S3::Bucket"
-  #   DeletionPolicy: Retain
-#Outputs:
-#  wproot:
-#    Description: Access URL for Application
-#    Value: !Join ["", ["https://", !GetAtt EC2.PublicIp, ":2525"]]
-#  wpadmin:
-#    Description: Admin Login URL - if restoring from snap, always go to this URL first
-#    Value: !Join ["", ["http://", !GetAtt EC2.PublicIp, "/wordpress/wp-login.php"]]
+              command: /home/ec2-user/get-selfinfo.sh
+            02_launch_install_coordinator:
+              cwd: "/home/ec2-user"
+              command: /home/ec2-user/inst-coordinator.sh
+
+  DatabaseLaunchConfig:
+    DependsOn: 
+      - DatabaseSubnetAssociationWithRouteTable
+      - InstallerBucketPolicy
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties: 
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
+      InstanceType: !Ref DatabaseInstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      AssociatePublicIpAddress: false
+      KeyName: !Ref PubKeyName
+      SecurityGroups:
+        - !Ref PrivateSecurityGroup
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash
+            aws configure set region ${AWS::Region}
+            runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
+            runuser -l ec2-user -c 'echo DatabaseServerGroup > /home/ec2-user/role.info'
+            yum update -y aws-cfn-bootstrap
+            yum -y update
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource DatabaseLaunchConfig --configsets solution_cs
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource DatabaseServerGroup
+    Metadata:
+      AWS::CloudFormation::Authentication:
+        S3AccessCreds:
+          type: S3
+          accessKeyId: !Ref InstallerAccessKey
+          secretKey: !GetAtt InstallerAccessKey.SecretAccessKey
+          buckets:
+            - !Ref InstallerBucketName
+      AWS::CloudFormation::Init:
+        configSets:
+          solution_cs:
+            - "configure_cfn"
+            - "prepare_install"
+            - "install_node"
+        configure_cfn:
+          files:
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.DatabaseLaunchConfig.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource DatabaseLaunchConfig --configsets solution_cs
+              mode: "000400"
+              owner: root
+              group: root
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                verbose=true
+                interval=5
+              mode: "000400"
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - "/etc/cfn/cfn-hup.conf"
+                  - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+        prepare_install:
+          packages:
+            yum:
+              jq: []
+          sources:
+            /home/ec2-user: !Join ["", ["https://", !Ref InstallerBucketName, ".s3.amazonaws.com/", !Ref InstallerCoordinator]]
+        install_node:
+          commands:
+            01_print_nodes_info:
+              cwd: "/home/ec2-user"
+              command: /home/ec2-user/get-selfinfo.sh
+            02_launch_install_coordinator:
+              cwd: "/home/ec2-user"
+              command: /home/ec2-user/inst-coordinator.sh
+
+  SearchEngineLaunchConfig:
+    DependsOn: 
+      - SearchEngineSubnetAssociationWithRouteTable
+      - InstallerBucketPolicy
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties: 
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMALINUX]
+      InstanceType: !Ref SearchEngineInstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      AssociatePublicIpAddress: false
+      KeyName: !Ref PubKeyName
+      SecurityGroups:
+        - !Ref PrivateSecurityGroup
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash
+            aws configure set region ${AWS::Region}
+            runuser -l ec2-user -c 'aws configure set region ${AWS::Region}'
+            runuser -l ec2-user -c 'echo SearchEngineServerGroup > /home/ec2-user/role.info'
+            yum update -y aws-cfn-bootstrap
+            yum -y update
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource SearchEngineLaunchConfig --configsets solution_cs
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource SearchEngineServerGroup
+    Metadata:
+      AWS::CloudFormation::Authentication:
+        S3AccessCreds:
+          type: S3
+          accessKeyId: !Ref InstallerAccessKey
+          secretKey: !GetAtt InstallerAccessKey.SecretAccessKey
+          buckets:
+            - !Ref InstallerBucketName
+      AWS::CloudFormation::Init:
+        configSets:
+          solution_cs:
+            - "configure_cfn"
+            - "prepare_install"
+            - "install_node"
+        configure_cfn:
+          files:
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.SearchEngineLaunchConfig.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource SearchEngineLaunchConfig --configsets solution_cs
+              mode: "000400"
+              owner: root
+              group: root
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                verbose=true
+                interval=5
+              mode: "000400"
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - "/etc/cfn/cfn-hup.conf"
+                  - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+        prepare_install:
+          packages:
+            yum:
+              jq: []
+          sources:
+            /home/ec2-user: !Join ["", ["https://", !Ref InstallerBucketName, ".s3.amazonaws.com/", !Ref InstallerCoordinator]]
+        install_node:
+          commands:
+            01_print_nodes_info:
+              cwd: "/home/ec2-user"
+              command: /home/ec2-user/get-selfinfo.sh 
+            02_launch_install_coordinator:
+              cwd: "/home/ec2-user"
+              command: /home/ec2-user/inst-coordinator.sh
+
+# AutoScalingGroups only load corresponding launch configurations. userdata and metadata are NOT stored in AutoScalingGroups.
+
+  ApplicationServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: 
+        - Ref: ApplicationSubnet
+      LaunchConfigurationName:
+        Ref: ApplicationLaunchConfig
+      MinSize: !FindInMap [InstanceSpec, !Ref EnvironmentSize, InstCnt]
+      MaxSize: !FindInMap [InstanceSpec, !Ref EnvironmentSize, InstCnt]
+      Tags:
+        - Key: Name
+          Value: Application Node
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: !FindInMap [InstanceSpec, !Ref EnvironmentSize, InstCnt]
+        Timeout: !FindInMap [InstanceSpec, !Ref EnvironmentSize, CreationTimeOut]
+    DeletionPolicy: Delete
+
+  DatabaseServerGroup:
+    DependsOn: 
+      - CfnEndpoint
+      - NATInstance
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: 
+        - Ref: DatabaseSubnet
+      LaunchConfigurationName: !Ref DatabaseLaunchConfig
+      MinSize: !FindInMap [InstanceSpec, !Ref EnvironmentSize, InstCnt]
+      MaxSize: !FindInMap [InstanceSpec, !Ref EnvironmentSize, InstCnt]
+      Tags:
+        - Key: Name
+          Value: Database Node
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: !FindInMap [InstanceSpec, !Ref EnvironmentSize, InstCnt]
+        Timeout: !FindInMap [InstanceSpec, !Ref EnvironmentSize, CreationTimeOut]
+    DeletionPolicy: Delete
+
+  SearchEngineServerGroup:
+    DependsOn: 
+      - CfnEndpoint
+      - NATInstance
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: 
+        - Ref: SearchEngineSubnet
+      LaunchConfigurationName: !Ref SearchEngineLaunchConfig
+      MinSize: !FindInMap [InstanceSpec, !Ref EnvironmentSize, InstCnt]
+      MaxSize: !FindInMap [InstanceSpec, !Ref EnvironmentSize, InstCnt]
+      Tags:
+        - Key: Name
+          Value: Search Engine Node
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: !FindInMap [InstanceSpec, !Ref EnvironmentSize, InstCnt]
+        Timeout: !FindInMap [InstanceSpec, !Ref EnvironmentSize, CreationTimeOut]
+    DeletionPolicy: Delete
+
+Outputs:
+  BastionHostInfo:
+    Description: Baston Host address
+    Value: !Join ["", ["ssh ec2-user@", !GetAtt NATInstance.PublicIp]]
