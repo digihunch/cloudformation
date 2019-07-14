@@ -21,7 +21,8 @@ Although autoscaling group is used, this solution does not actually allow expans
 
 ## Expand the template
 1. If the stack is to be deployed across multiple AZs, more subnets should be created accordingly.
-2. Further improving this template most likely requires configuring local aws cli environment. You will need an api access user created in your account and ensure that:
+2. To deploy the stack in multiple regions, run the script multiple times. (Once limitation 1 is addressed.)
+3. Further improving this template most likely requires configuring local aws cli environment. You will need an api access user created in your account and ensure that:
 - the user has cloudformation full privilege
 - the user has the privilege to allow cloudformation template to do what it needs to do.
 - if the above is too much to micro-manage, then give the user administrator access, although considered bad security practice.
@@ -29,9 +30,11 @@ Although autoscaling group is used, this solution does not actually allow expans
 ## Limitations
 1. Most logical resource names are hard coded. Therefore you cannot use this template to create two under the same account. More work needed to ensure logical resource names do not overlap.
 
-2. There are manual steps to create and upload public key and prepare the file in S3 bucket. This can be automated as well.
+2. There are manual steps to create and upload public key and prepare the file in S3 bucket. This should be automated (including key pair generation).
 
 3. There is no load balancer involved in this template, although a flag is created to indicate weather load balancer should be created. More work is needed to configure load balancer and associate it with an autoscaling group.
+
+4. IP address block being used is statically managed. In the future this should be stored in DynamoDB and managed dynamically.
 
 ## Useful Commands
 <!--- aws cloudformation validate-template template-body file://SolutionStack.yml -->
