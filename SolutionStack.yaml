@@ -53,7 +53,7 @@ Parameters:
     Default: aws-cf-files
   PubKeyName:
     Type: String
-    Default: SolutionFormationPublicKey
+    Default: cskey 
 
 # Note: this condition is not used at this stage.
 Conditions:

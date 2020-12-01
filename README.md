@@ -15,7 +15,7 @@ This templates creates a public subnet with application nodes and NAT/Bastion in
 Although autoscaling group is used, this solution does not actually allow expansion of the group. Neither does it configure load balancer at this point.
 
 ## How to use
-1. Have your own keypair and upload the public key to EC2 Key Pairs e.g. "SolutionFormationPublicKey"
+1. Have your own keypair and upload the public key to EC2 Key Pairs e.g. "cskey"
 2. Have your own S3 bucket for installers e.g. "aws-cf-files", and upload the zip files containing coordinator scripts
 3. Update the template with proper names for key pairs and bucket name
 
