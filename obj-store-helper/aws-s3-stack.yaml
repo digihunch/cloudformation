@@ -1,0 +1,103 @@
+Parameters:
+  VendorName:
+    Type: String
+    Default: arc
+    AllowedPattern: '^[a-z0-9]{2,32}$'
+  S3BucketName:
+    Type: String
+    Default: archive
+    AllowedPattern: '^[a-z0-9-]{4,40}$'
+    ConstraintDescription: 3-63 characters; must contain only lowercase letters or numbers
+  EnvironmentType:
+    Type: String
+    Default: tst 
+    AllowedValues:
+      - prd
+      - tst
+Resources:
+  VendorS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketName: 
+        Fn::Join:
+          - '-'
+          - - !Ref VendorName 
+            - !Ref EnvironmentType
+            - !Ref S3BucketName
+      Tags:
+        - Key: Vendor
+          Value: !Ref VendorName 
+        - Key: Environment
+          Value: !Ref EnvironmentType
+  VendorIAMUserforS3:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+      - PolicyName: VendorIAMUserPolicy
+        PolicyDocument:
+          Statement:
+            - Sid: VendorIAMUserforS3 
+              Effect: Allow
+              Action: 'S3:*'
+              Resource: 
+                - !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - !Ref VendorS3Bucket
+                - !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - !Ref VendorS3Bucket
+                    - '/*'
+  S3UserKeys:
+    DependsOn: VendorIAMUserforS3
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName:
+        Ref: VendorIAMUserforS3
+  VendorS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref VendorS3Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: "Deny any S3 action for IAM user not recognized"
+            Action: 
+              - "s3:*"
+            Effect: "Deny"
+            Resource:
+              Fn::Join:
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref VendorS3Bucket
+                  - '/*'
+            NotPrincipal:
+              AWS: !GetAtt VendorIAMUserforS3.Arn
+Outputs:
+  S3BucketName:
+    Description: Bucket Resource Export for future cross-stack reference
+    Value: !Ref VendorS3Bucket
+  BucketDomainName:
+    Description: Bucket domain name
+    Value: !GetAtt VendorS3Bucket.DomainName
+  BucketRegionalDomainName:
+    Description: Bucket regional domain name
+    Value: !GetAtt VendorS3Bucket.RegionalDomainName
+  IAMUserName:
+    Description: System generated IAM User name for s3 client access
+    Value: !Ref VendorIAMUserforS3
+  AccessKeyId:
+    Description: The Access Key Id for s3 client access
+    Value: !Ref S3UserKeys
+  SecretKey:
+    Description: The Secret Key for s3 client access
+    Value: !GetAtt S3UserKeys.SecretAccessKey
