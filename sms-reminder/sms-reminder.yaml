@@ -1,0 +1,77 @@
+# aws cloudformation create-stack --stack-name reminder-stack --template-body file://sms-reminder.yaml --capabilities CAPABILITY_IAM
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Resources to send SMS reminder on a future point of time. 
+
+Parameters:
+  ReminderScheduleExpression:
+    Type: String
+    Description: Schedule Expression of the Reminder EventBridge
+    Default:  at(2023-05-06T00:30:00)
+    AllowedPattern: ^(at|cron|rate)\(.*\)$
+  SMSPhoneNumbers:
+    Type: CommaDelimitedList 
+    Description: Comma Separated List of two Phone Numbers to receive SMS notification
+    Default: 14168765928,16478658967
+    AllowedPattern: ^1[0-9]{10}$
+  MessageContent:
+    Type: String
+    Description: Reminder SMS Message Text
+    Default: Reminder Message Here
+  TopicName:
+    Type: String
+    Description: Topic Name
+    Default: SMS-Reminder-Topic
+  TimeZone:
+    Type: String
+    Description: Schedule Time Zone
+    Default: America/Toronto 
+Resources:
+  ReminderSNSTopic: 
+    Type: AWS::SNS::Topic
+    Properties: 
+      Subscription:
+        - Endpoint: !Select [ 0, !Ref SMSPhoneNumbers] 
+          Protocol: sms
+        - Endpoint: !Select [ 1, !Ref SMSPhoneNumbers] 
+          Protocol: sms
+      TopicName: !Ref TopicName     
+  ReminderScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - scheduler.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ReminderScheduleRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !GetAtt ReminderSNSTopic.TopicArn 
+  ReminderSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties: 
+      Description: EventBridge Schedule 
+      FlexibleTimeWindow: 
+        Mode: 'OFF'
+      Name: ReminderScheduler 
+      ScheduleExpression: !Ref ReminderScheduleExpression 
+      ScheduleExpressionTimezone: !Ref TimeZone 
+      State: ENABLED
+      Target: 
+        Arn: !GetAtt ReminderSNSTopic.TopicArn
+        RoleArn: !GetAtt ReminderScheduleRole.Arn 
+        Input: !Ref MessageContent 
+Outputs: 
+  ReminderTopicArn: 
+    Description: Arn of Created SNS Topic
+    Value: !Ref ReminderSNSTopic
