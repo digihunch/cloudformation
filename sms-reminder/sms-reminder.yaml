@@ -11,7 +11,7 @@ Parameters:
   SMSPhoneNumbers:
     Type: CommaDelimitedList 
     Description: Comma Separated List of two Phone Numbers to receive SMS notification
-    Default: 14168765928,16478658967
+    Default: 14167792345,12263789036
     AllowedPattern: ^1[0-9]{10}$
   MessageContent:
     Type: String
